@@ -3204,7 +3204,29 @@ namespace plume {
 
         psoDesc.InputLayout = { inputElements.data(), UINT(inputElements.size()) };
 
-        device->d3d->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&d3d));
+        HRESULT res = device->d3d->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&d3d));
+        if (FAILED(res)) {
+            fprintf(stderr, "CreateGraphicsPipelineState failed with error code 0x%lX.\n", res);
+            // E_INVALIDARG on its own says nothing. With the debug layer on, the
+            // reason is sitting in the info queue -- drain it, or the caller is
+            // left guessing at a root signature / input layout / format mismatch.
+            ID3D12InfoQueue *infoQueue = nullptr;
+            if (SUCCEEDED(device->d3d->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
+                const UINT64 count = infoQueue->GetNumStoredMessages();
+                for (UINT64 i = 0; i < count; i++) {
+                    SIZE_T length = 0;
+                    if (FAILED(infoQueue->GetMessage(i, nullptr, &length))) continue;
+                    std::vector<uint8_t> storage(length);
+                    D3D12_MESSAGE *message = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
+                    if (SUCCEEDED(infoQueue->GetMessage(i, message, &length))) {
+                        fprintf(stderr, "  [d3d12] %s\n", message->pDescription);
+                    }
+                }
+                infoQueue->ClearStoredMessages();
+                infoQueue->Release();
+            }
+            return;
+        }
     }
 
     D3D12GraphicsPipeline::~D3D12GraphicsPipeline() {
@@ -3915,7 +3937,14 @@ namespace plume {
     }
 
     std::unique_ptr<RenderPipeline> D3D12Device::createGraphicsPipeline(const RenderGraphicsPipelineDesc &desc) {
-        return std::make_unique<D3D12GraphicsPipeline>(this, desc);
+        auto pipeline = std::make_unique<D3D12GraphicsPipeline>(this, desc);
+        if (pipeline->d3d == nullptr) {
+            // Returning a pipeline that wraps a null PSO turns a reportable
+            // failure into SetPipelineState(nullptr), which access-violates
+            // inside d3d12.dll with no message.
+            return nullptr;
+        }
+        return pipeline;
     }
 
     std::unique_ptr<RenderPipeline> D3D12Device::createRaytracingPipeline(const RenderRaytracingPipelineDesc &desc, const RenderPipeline *previousPipeline) {
