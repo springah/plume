@@ -2312,7 +2312,12 @@ namespace plume {
 
         const D3D12_TEXTURE_COPY_LOCATION copyDstLocation = toD3D12(dstLocation);
         const D3D12_TEXTURE_COPY_LOCATION copySrcLocation = toD3D12(srcLocation);
-        setSamplePositions(dstLocation.texture);
+        // A PLACED_FOOTPRINT destination is a BUFFER -- its texture is null.
+        // setSamplePositions only asserts, which is compiled out in Release, so
+        // it then dereferences null: every texture->buffer readback crashed.
+        if (dstLocation.texture != nullptr) {
+            setSamplePositions(dstLocation.texture);
+        }
         d3d->CopyTextureRegion(&copyDstLocation, dstX, dstY, dstZ, &copySrcLocation, (srcBox != nullptr) ? &copyBox : nullptr);
         resetSamplePositions();
     }
