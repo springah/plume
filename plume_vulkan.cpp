@@ -2469,8 +2469,18 @@ namespace plume {
         dstWidth = ANativeWindow_getWidth(desc.renderWindow);
         dstHeight = ANativeWindow_getHeight(desc.renderWindow);
 #   elif defined(__linux__)
-        XWindowAttributes attributes;
-        XGetWindowAttributes(desc.renderWindow.display, desc.renderWindow.window, &attributes);
+        // Status must be checked: on failure the struct is left UNINITIALIZED,
+        // and the callers treat whatever garbage (or zeros) comes back as the
+        // window's true size -- isEmpty() then reports an unusable swapchain
+        // for a perfectly good window, forever.
+        XWindowAttributes attributes = {};
+        const int ok = XGetWindowAttributes(desc.renderWindow.display, desc.renderWindow.window, &attributes);
+        if (!ok) {
+            fprintf(stderr, "XGetWindowAttributes failed for window 0x%lx.\n", desc.renderWindow.window);
+            dstWidth = 0;
+            dstHeight = 0;
+            return;
+        }
         // The attributes width and height members do not include the border.
         dstWidth = attributes.width;
         dstHeight = attributes.height;
@@ -3229,7 +3239,45 @@ namespace plume {
             imageCopy.imageExtent.depth = srcLocation.placedFootprint.depth;
             vkCmdCopyBufferToImage(vk, srcBuffer->vk, dstTexture->vk, toImageLayout(dstTexture->textureLayout), 1, &imageCopy);
         }
+        else if ((dstLocation.type == RenderTextureCopyType::PLACED_FOOTPRINT) && (srcLocation.type == RenderTextureCopyType::SUBRESOURCE)) {
+            // Texture -> buffer readback. The D3D12 backend gets this for free
+            // from CopyTextureRegion; here the old else-branch assumed
+            // texture -> texture and dereferenced the null dstTexture. Sibling
+            // of "do not sample-position a buffer copy destination".
+            assert(srcTexture != nullptr);
+            assert(dstBuffer != nullptr);
+
+            const uint32_t blockWidth = RenderFormatBlockWidth(srcTexture->desc.format);
+            VkBufferImageCopy imageCopy = {};
+            imageCopy.bufferOffset = dstLocation.placedFootprint.offset;
+            imageCopy.bufferRowLength = ((dstLocation.placedFootprint.rowWidth + blockWidth - 1) / blockWidth) * blockWidth;
+            imageCopy.bufferImageHeight = ((dstLocation.placedFootprint.height + blockWidth - 1) / blockWidth) * blockWidth;
+            imageCopy.imageSubresource.aspectMask = toAspectFlags(srcTexture->desc.format, srcTexture->desc.flags);
+            imageCopy.imageSubresource.baseArrayLayer = srcLocation.subresource.arrayIndex;
+            imageCopy.imageSubresource.layerCount = 1;
+            imageCopy.imageSubresource.mipLevel = srcLocation.subresource.mipLevel;
+            if (srcBox != nullptr) {
+                imageCopy.imageOffset.x = srcBox->left;
+                imageCopy.imageOffset.y = srcBox->top;
+                imageCopy.imageOffset.z = srcBox->front;
+                imageCopy.imageExtent.width = srcBox->right - srcBox->left;
+                imageCopy.imageExtent.height = srcBox->bottom - srcBox->top;
+                imageCopy.imageExtent.depth = srcBox->back - srcBox->front;
+            }
+            else {
+                imageCopy.imageOffset.x = 0;
+                imageCopy.imageOffset.y = 0;
+                imageCopy.imageOffset.z = 0;
+                imageCopy.imageExtent.width = dstLocation.placedFootprint.width;
+                imageCopy.imageExtent.height = dstLocation.placedFootprint.height;
+                imageCopy.imageExtent.depth = dstLocation.placedFootprint.depth;
+            }
+
+            vkCmdCopyImageToBuffer(vk, srcTexture->vk, toImageLayout(srcTexture->textureLayout), dstBuffer->vk, 1, &imageCopy);
+        }
         else {
+            assert(dstTexture != nullptr);
+            assert(srcTexture != nullptr);
             VkImageCopy imageCopy = {};
             imageCopy.srcSubresource.aspectMask = toAspectFlags(srcTexture->desc.format, srcTexture->desc.flags);
             imageCopy.srcSubresource.baseArrayLayer = srcLocation.subresource.arrayIndex;
