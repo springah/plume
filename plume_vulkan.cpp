@@ -15,6 +15,10 @@
 #include <climits>
 #include <unordered_map>
 
+#if defined(__APPLE__)
+#   include <dlfcn.h>
+#endif
+
 #if DLSS_ENABLED
 #   include "render/plume_dlss.h"
 #endif
@@ -4513,6 +4517,35 @@ namespace plume {
     VulkanInterface::VulkanInterface() {
 #endif
         VkResult res = volkInitialize();
+#   if defined(__APPLE__)
+        if (res != VK_SUCCESS) {
+            // volk only tries bare leaf names (plus /usr/local/lib), and modern
+            // dyld resolves none of them: there is no system Vulkan loader on
+            // macOS and Homebrew on Apple Silicon lives in /opt/homebrew. The
+            // app bundle ships MoltenVK at Contents/lib -- dlopen expands
+            // @executable_path -- and the Homebrew path covers bare builds.
+            static const char* kMoltenVKFallbacks[] = {
+                "@executable_path/../lib/libMoltenVK.dylib",
+                "/opt/homebrew/lib/libMoltenVK.dylib",
+                "/usr/local/lib/libMoltenVK.dylib",
+            };
+            for (const char* path : kMoltenVKFallbacks) {
+                void* module = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+                if (module == nullptr) {
+                    continue;
+                }
+                auto gipa = (PFN_vkGetInstanceProcAddr)dlsym(module, "vkGetInstanceProcAddr");
+                if (gipa == nullptr) {
+                    dlclose(module);
+                    continue;
+                }
+                volkInitializeCustom(gipa);
+                fprintf(stderr, "plume: volk fell back to MoltenVK at %s.\n", path);
+                res = VK_SUCCESS;
+                break;
+            }
+        }
+#   endif
         if (res != VK_SUCCESS) {
             fprintf(stderr, "volkInitialize failed with error code 0x%X.\n", res);
             return;
